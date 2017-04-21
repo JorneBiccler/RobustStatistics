@@ -201,11 +201,12 @@ penalizedBrier <- function(timeVar, d01, X, evalTimes,
   initStep <- stepSize
   
   ## calculate some data that's used in the gradient
+  exY <- extendedY(evalTimes = evalTimes, 
+                   timeVar = timeVar)
   IPWWeights <- exY^(1 - d01)
   IPWWeights <- IPWWeights / pmax(as.numeric(cProbEvalTimes), cProbTimeVar)
   timeAtRiskMat <- timeAtRisk(evalTimes, breaks, 1, length(timeVar))
-  exY <- extendedY(evalTimes = evalTimes, 
-                   timeVar = timeVar)
+
   transformMat <- paramTransMat(nIntervals = length(breaks) - 1,
                                 nParameters = ncol(X) + 1)
   largeX <- X2[rep(1:length(timeVar), length(evalTimes)), ]
