@@ -1,0 +1,350 @@
+---
+title: "Data Cleaning"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(encoding = "UTF-8")
+```
+
+```{r warning = FALSE, include=FALSE }
+library(lubridate)
+library(ggplot2)
+```
+
+# Denmark
+## Preliminary cleaning
+Read data
+
+```{r warning = FALSE}
+dlbclDKComp <- readRDS(file = paste("//ithfil08/Projekt/Projekter/",
+                                "Scientific Projects/141_Jorne_phd/",
+                                "GeneratedData/TarecGalalyBigData_maj2016.rds",
+                                sep = ""))
+```
+Remove patients treated with no treatment info or treated with ICE or DHAP
+
+```{r warning = FALSE}
+noTrInfo <- is.na(dlbclDKComp$Evt..kemoterapiregime.nr..3) & 
+  is.na(dlbclDKComp$Evt..kemoterapiregime.nr..2) & 
+  is.na(dlbclDKComp$Kemoterapiregime.nr..1) 
+
+dlbclDKComp <- dlbclDKComp[!noTrInfo, ]
+
+trToRemove <- c("ICE", "DHAP")
+toRemove <- (dlbclDKComp$Evt..kemoterapiregime.nr..3 %in% trToRemove) | 
+            (dlbclDKComp$Evt..kemoterapiregime.nr..2 %in% trToRemove) | 
+            (dlbclDKComp$Kemoterapiregime.nr..1 %in% trToRemove) 
+dlbclDKComp <- dlbclDKComp[!toRemove, ]
+```
+
+
+## Restrict our dataset to CHOP / CHOEP/ CEOP treatment 
+
+```{r warning = FALSE}
+chopLike <- c("CHOP", "CHOEP", "CHIC", "CEOP")
+
+## check regime 3
+trRegimes <- c("Kemoterapiregime.nr..1", 
+               "Evt..kemoterapiregime.nr..2", 
+               "Evt..kemoterapiregime.nr..3")
+lengthOfTr<- c("Cycluslængde.(reg.1)", "Cycluslængde.(reg.2)", "Cycluslængde.(reg.3)")
+numberOfCycles <- c("Cyclusantal.(reg.1)", "Cyclusantal.(reg.2)", "Cyclusantal.(reg.3)")
+
+tr1inChoplike <- dlbclDKComp[, trRegimes[1]] %in% chopLike
+tr2inChoplike <- dlbclDKComp[, trRegimes[2]] %in% chopLike
+tr3inChoplike <- dlbclDKComp[, trRegimes[3]] %in% chopLike
+
+obsToInclude <- tr1inChoplike | tr2inChoplike | tr3inChoplike
+
+toRemove <- c("Kemoterapi", trRegimes, numberOfCycles)
+dlbclDKComp <- dlbclDKComp[obsToInclude, !names(dlbclDKComp) %in% toRemove]
+```
+Remove people with CNS, eye, or leptomeninges involvement + remove the corresponding variables
+
+```{r warning = FALSE}
+patientsToExcl <- (dlbclDKComp$CNS %in% "Ja" | dlbclDKComp$Øje %in% "Ja" | 
+                   dlbclDKComp$Leptomeninges %in% "Ja")
+dlbclDKComp <- dlbclDKComp[!patientsToExcl, !names(dlbclDKComp) %in% c("CNS", 
+                                                                       "Øje", 
+                                                                       "Leptomeninges")]
+```
+
+
+## Create variables associated with censoring / death
+### Survival
+Create a time variable named timeVar
+
+```{r warning = FALSE}
+CPRDateNaInd <- dlbclDKComp$`CPR-reg..dødsdato` == "."
+dlbclDKComp$`CPR-reg..dødsdato`[CPRDateNaInd] <- NA
+
+timeVar <- rep(NA, nrow(dlbclDKComp))
+timeVar[!CPRDateNaInd] <- (dmy(dlbclDKComp$`CPR-reg..dødsdato`) - 
+                           dmy(dlbclDKComp$Dato.for.diagnostisk.biopsi))[!CPRDateNaInd]
+timeVar[CPRDateNaInd] <- (dmy(dlbclDKComp$`Opslagsdato.for.KM-dage.(død)`) - 
+                          dmy(dlbclDKComp$Dato.for.diagnostisk.biopsi))[CPRDateNaInd]
+
+## remove patient(s) for who no meaningfull timevar was calculated
+dlbclDKComp <- dlbclDKComp[!is.na(timeVar), ]
+CPRDateNaInd <- CPRDateNaInd[!is.na(timeVar)]
+timeVar <- timeVar[!is.na(timeVar)]
+```
+
+Create a censoring variable named d01 (0 if censored)
+
+```{r warning = FALSE}
+d01 <- rep(1, nrow(dlbclDKComp))
+d01[CPRDateNaInd] <- 0
+```
+
+Create a time variable corresponding with relapse time called timeTillRelapse. 
+This variable contains NA when no relapse occured
+
+```{r warning = FALSE}
+noRelapse <- dlbclDKComp$`Relaps-./.progressionsdato` == "."
+timeTillRelapseDK <- rep(NA, nrow(dlbclDKComp))
+timeTillRelapseDK[!noRelapse] <- (dmy(dlbclDKComp$`Relaps-./.progressionsdato`) - 
+                                  dmy(dlbclDKComp$Dato.for.diagnostisk.biopsi))[!noRelapse]
+```
+
+Add the constructed variables to the dataframe
+
+```{r warning = FALSE}
+dlbclDKComp$timeVar <- timeVar
+dlbclDKComp$d01 <- d01
+dlbclDKComp$timeTillRelapse <- timeTillRelapseDK
+```
+
+Create a variable corresponding with the event free survival events
+
+```{r warning = FALSE}
+dlbclDKComp$efsEventTime <- timeVar
+dlbclDKComp$efsEventTime[!is.na(timeTillRelapseDK)] <-
+  timeTillRelapseDK[!is.na(timeTillRelapseDK)]
+dlbclDKComp$d01Efs <- as.numeric(d01 == 1 | !is.na(timeTillRelapseDK))
+```
+
+
+Function to check if all information is included in the combined variables:
+
+```{r warning = FALSE}
+LeftRightCheck <- function(originalName, leftRightPrefix){
+  dlbclDKComp[is.na(dlbclDKComp[, paste(leftRightPrefix, ".venstre.side", 
+                                        sep = "")]),
+              paste(leftRightPrefix, ".venstre.side", sep = "")] <- "Nej"
+  dlbclDKComp[is.na(dlbclDKComp[, paste(leftRightPrefix, ".højre.side", 
+                                        sep = "")]),
+              paste(leftRightPrefix, ".højre.side", sep = "")] <- "Nej"
+  leftRightTumor <- (dlbclDKComp[, paste(leftRightPrefix, ".højre.side", 
+                                         sep = "")] == "Ja" | 
+                     dlbclDKComp[, paste(leftRightPrefix, ".venstre.side", 
+                                         sep = "")] == "Ja")
+  sum(dlbclDKComp[leftRightTumor, originalName] == "Ja", na.rm = T) == sum(leftRightTumor)
+}
+```
+
+Use this function to check the relevant variables
+
+```{r warning = FALSE}
+LeftRightCheck("Tonsilla.Palatina", "Tonsil")
+LeftRightCheck("Hals.Øvre", "Hals")
+LeftRightCheck("Supraclaviculært", "Supraklavikulært")
+LeftRightCheck("Infraclaviculært", "Infraclavikulært")
+LeftRightCheck("Axiller", "Axil")
+LeftRightCheck("Lungehili", "Lungehilus")
+LeftRightCheck("Pelvis", "Pelvis")
+LeftRightCheck("Ingvinale", "Ingvinal")
+```
+
+### Hemoglobin (convert from mmol/l to g/l, source: wikipedia)
+
+```{r warning = FALSE}
+dlbclDKComp$Hemoglobin <- as.numeric(dlbclDKComp$`Hæmoglobin(mmol/L)`) * 16.000
+```
+
+There are some negative Hemoglobin values, set these to NA
+```{r warning = FALSE}
+dlbclDKComp$Hemoglobin[dlbclDKComp$Hemoglobin < 0] <- NA
+```
+
+### convert lymfocytter column in % to to lymfocytter mia/l
+```{r warning = FALSE}
+converted <- as.numeric(dlbclDKComp$`Leukocytter(mia/L)`) *
+  as.numeric(dlbclDKComp$`Lymfocytter(%)`)/100
+dlbclDKComp$`Lymfocytter(mia/L)` <- as.numeric(dlbclDKComp$`Lymfocytter(mia/L)`) 
+dlbclDKComp$`Lymfocytter(mia/L)`[!is.na(converted)] <- converted[!is.na(converted)]
+```
+### Albumin 66,5 kDa (source: wikipedia)
+
+```{r warning = FALSE}
+dlbclDKComp$Albumin <- as.numeric(dlbclDKComp$`Albumin(mikromol/L)`) * 10^(-6) * 66500
+hist(dlbclDKComp$Albumin, main = "converted from mikromol")
+AlbuminIndicesGr <- dlbclDKComp$`Albumin(g/L)` != "." & !is.na(dlbclDKComp$`Albumin(g/L)`)
+hist(as.numeric(dlbclDKComp$`Albumin(g/L)`), main = "Originally reported in g/l")
+```
+
+Histograms indicate that something might have gone wrong. Perhaps people reported g/l instead of mol/liter. 
+I guess we could assume that both dist should in principle be equal. the reported type (mol vs g) should be random.
+So I perform a more rigorous Kolmogorov-Smirnov (ks) test to test if there's a difference between the two distributions:
+
+```{r warning = FALSE}
+ks.test(as.numeric(dlbclDKComp$`Albumin(g/L)`), as.numeric(dlbclDKComp$Albumin))
+```
+
+Let's set extremely small values, relative to the quantiles of the g/l variable, to NA.
+
+
+```{r warning = FALSE}
+quantile(as.numeric(dlbclDKComp$`Albumin(g/L)`), na.rm = T, 
+         probs = c(0.01, 0.001, 0.0001)) 
+```
+
+Seems a lot better, hence we'll use this in the final Danish dataset
+
+```{r warning = FALSE}
+dlbclDKComp$Albumin[AlbuminIndicesGr] <- as.numeric(dlbclDKComp$`Albumin(g/L)`[AlbuminIndicesGr])
+```
+
+## Merge albumin corrected and total calcium
+
+```{r warning = FALSE}
+tempCalcium <- as.numeric(dlbclDKComp$`Total.Calcium(mmol/L)`) + 0.02 * 
+  (40 - dlbclDKComp$Albumin)
+```
+
+```{r warning = FALSE}
+dlbclDKComp$CalciumAlbuminCor <- tempCalcium
+numCaAlbCor <- as.numeric(dlbclDKComp$`Calcium,.albuminkorrigeret(mmol/L)`)
+dlbclDKComp$CalciumAlbuminCor[!is.na(numCaAlbCor)] <- numCaAlbCor[!is.na(numCaAlbCor)]
+dlbclDKComp <- dlbclDKComp[, names(dlbclDKComp) != "Total.Calcium(mmol/L)"]
+```
+
+In tumor location variables the NAs should correspond with Nej
+
+```{r warning = FALSE}
+locationNames <- c("Rhinopharynx", "Waldeyers.svælgring", "Tonsilla.Palatina", 
+                   "Hals.Øvre", "Supraclaviculært", "Infraclaviculært", "Axiller", 
+                   "Mediastinum", "Lungehili", "Retroperitoneum", "Tarmkrøs", 
+                   "Pelvis", "Ingvinale", "Milt", "Knoglemarv", "Orbita", 
+                   "Tårekirtel", "Bihuler", "Cavum.nasi", "Mundhule.i.øvrigt", 
+                   "Spytkirtler", "Gl..thyroidea", "Cor", "Mamma", "Lunger", 
+                   "Ventrikel", "Tyndtarm", "Tyktarm", "Pankreas", "Nyrer", "Lever", 
+                   "Perikardieeksudat.med.lymfomceller", "Pleuraeksudat.med.lymfomceller", 
+                   "Ascites.med.lymfomceller", "Testis", "Urinblære", "Ovarier", 
+                   "Vagina", "Uterus", "Hud", "Muskulatur", "Knogler", 
+                   "Intravaskulært")
+dlbclDKComp[, locationNames][is.na(dlbclDKComp[, locationNames])] <- "Nej"
+```
+
+
+```{r warning = F}
+numericVar <- c("Alder", "Antal.regioner", "LDH(U/L)", 
+                "Stråleterapi:.Dosis.i.Gray", "Stråleterapi:.Antal.fraktioner", 
+                "Cyclusantal.(reg..1)", "Cyclusantal.(reg..2)", "Cyclusantal.(reg..3)", 
+                "Radioimmunoter.:.Dosis.i.Gray", "Stråleter.:.Dosis.i.Gray", 
+                "timeVar", "d01", "timeTillRelapse", "Hemoglobin", "Albumin",
+                "Strålebeh.:.Antal.fraktioner", "ENODAL", "Immunoterapi.cyclusantal.1",
+                "Immunoterapi.cyclusantal", "Lymfocytter(mia/L)", "Leukocytter(mia/L)",
+                "efsEventTime", "d01Efs")
+
+invisible(lapply(numericVar, function(x) dlbclDKComp[, x] <<- as.numeric(dlbclDKComp[, x])))
+```
+
+Change the class of the non- numeric variables to factors
+
+```{r warning = F}
+factorVar <- names(dlbclDKComp)[!names(dlbclDKComp) %in% numericVar]
+invisible(lapply(factorVar, function(x) dlbclDKComp[, x] <<- as.factor(dlbclDKComp[, x])))
+```
+
+Change the "." values to NA in the IPI factor
+```{r warning = F}
+levels(dlbclDKComp$IPI)[1] <- NA
+```
+
+Create a more uniform coding system
+
+```{r warning = F}
+levels(dlbclDKComp$`Stadium.(Ann.Arbor)`) <- c("Ann Arbor I", "Ann Arbor II", 
+                                               "Ann Arbor III", "Ann Arbor IV", NA)
+levels(dlbclDKComp$WHO.Performance.status) <- c("Asymptomatic", 
+                                                "Symptomatic but completely ambulatory", 
+                                                "Symptomatic, <50% in bed", 
+                                                "Symptomatic, >50% in bed", 
+                                                "Bedbound")
+```
+
+Fill in some of the missing IPI values, if no IPI value can be obtained the observations are removed from the data-set
+```{r warning = F}
+tempIpi <- dlbclDKComp$`Stadium.(Ann.Arbor)` %in% c("Ann Arbor III", "Ann Arbor IV") + 
+  (dlbclDKComp$ENODAL > 1) + dlbclDKComp$WHO.Performance.status %in% c("Symptomatic, <50% in bed", 
+                                                                       "Symptomatic, >50% in bed", 
+                                                                       "Bedbound") + 
+  (dlbclDKComp$Alder > 60) + (dlbclDKComp$`LDH-værdien.over.øvre.referencegrænse` == "Ja")
+## the %in% function has a non-standard way of dealing with NA's -> fix this
+tempIpi[is.na(dlbclDKComp$WHO.Performance.status) | is.na(dlbclDKComp$`Stadium.(Ann.Arbor)`)] <- NA
+## check if there are observations for which the original IPI variable contains
+## information but the new one does not
+sum(is.na(tempIpi) & !is.na(dlbclDKComp$IPI))
+## seems ok => replace the old variable
+dlbclDKComp$IPI <- tempIpi
+dlbclDKComp <- dlbclDKComp[!is.na(dlbclDKComp$IPI), ]
+```
+
+
+Translate the variable names, the DKTranslations.rds file contains a matrix
+with in the first column the danish variable names and in the second column
+a translation
+
+```{r warning = F}
+translations <- readRDS(paste("//ithfil08/Projekt/Projekter/",
+                              "Scientific Projects/141_Jorne_phd/",
+                              "Scripts/PrognosticModel/DataCleaning/",
+                              "DKTranslations.rds", sep = ""))
+
+positions <- match(names(dlbclDKComp), translations[, 1])
+
+names(dlbclDKComp)[!is.na(positions)] <- translations[positions[!is.na(positions)], 2]
+```
+
+Only include observations with complete info in Age, Performance status, Ann Arbor stage, LDH, Enodal
+
+```{r warning = F}
+necVarNames <- c("Age", "WHOPerformance", "LDH", "NumberOfExtraNodal", "AnnArborStage")
+dlbclDKComp <- dlbclDKComp[complete.cases(dlbclDKComp[, necVarNames]), ]
+```
+
+Remove people younger than 18 years old or diagnosed before 2006 (then the same standardization for all patients)
+
+```{r warning = FALSE}
+dlbclDKComp <- dlbclDKComp[dlbclDKComp$Age >= 18, ]
+dlbclDKComp <- dlbclDKComp[year(dmy(dlbclDKComp$Dato.for.diagnostisk.biopsi)) >= 2006, ]
+```
+
+Standardize the LDH (i.e. divide by the upper bound of the reference interval, seems what's somewhat standard in the litterature; e.g. in the NCNN)
+
+```{r warning = F}
+dlbclDKComp[dlbclDKComp$Age >= 70, ]$LDH <- dlbclDKComp[dlbclDKComp$Age >= 70, ]$LDH/255
+dlbclDKComp[dlbclDKComp$Age < 70, ]$LDH <- dlbclDKComp[dlbclDKComp$Age < 70, ]$LDH/205
+```
+
+Create a NCCN index
+```{r warning = F}
+dlbclDKComp$ExtraNodalNCCN <- (dlbclDKComp$Stomach == "Ja" | dlbclDKComp$SmallIntestine == "Ja" | dlbclDKComp$LargeBowel == "Ja" | dlbclDKComp$Pancreas == "Ja" | dlbclDKComp$Liver == "Ja" | dlbclDKComp$AscitesWithLymphcells == "Ja") + (dlbclDKComp$Lungs == "Ja" | dlbclDKComp$PleuralEffusionWithLymphcells == "Ja") + (dlbclDKComp$BoneMarrow == "Ja")
+```
+
+```{r warning = F}
+dlbclDKComp$NCCN <- dlbclDKComp$IPI + (dlbclDKComp$Age > 40) + (dlbclDKComp$Age > 75) +
+                    (dlbclDKComp$LDH > 3) - (dlbclDKComp$NumberOfExtraNodal > 1) + 
+                    (dlbclDKComp$ExtraNodalNCCN > 0)
+```
+
+Save the cleaned dataset
+```{r warning = F}
+saveRDS(dlbclDKComp, file = paste("//ithfil08/Projekt/Projekter/",
+                                "Scientific Projects/141_Jorne_phd/",
+                                "GeneratedData/dlbclDKContAlbumin.rds",
+                                sep = ""))
+```
