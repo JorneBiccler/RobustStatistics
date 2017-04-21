@@ -65,39 +65,6 @@ penalizedPathBrier(timeVar = simData$timeVar,
                    breaks = c(0, 75, Inf),
                    lambdaSeq = 10^(- seq(2, 4, 0.1)))
 
-
-penalizedMLE(timeVar = simData$timeVar, 
-             d01 = simData$d01, 
-             X = as.matrix(simData$X1),
-             init = c(-5, 0, 0 ,0), 
-             breaks = c(0, 75, Inf),
-             lambda = 0.10)
-
-penalizedMLE(timeVar = simData$timeVar, 
-             d01 = simData$d01, 
-             X = as.matrix(simData[c("X1", "X2", "X3", "X4")]),
-             init = c(log(sum(d01) / sum(timeVar)), 0, 5, 0, 0, 0, 0, 0, 0 ,0), 
-             breaks = c(0, 75, Inf),
-             lambda = 0)
-
-solutions <- NULL
-for(lambda in c(0, 10^(seq(-10,0, 0.5)))){
-  solutions <- cbind(solutions, 
-                     penalizedMLE(timeVar = timeVar, d01 = d01, X = cbind(X1, X2, X3, X4),
-                                  init = c(-5, -1, 0, 0, 0, rep(0, 30)), breaks = c(0, 10, 20, 30, 40, 50, 60, Inf),
-                                  lambda = lambda)
-  )
-}
-
-penalizedBrier(timeVar = timeVar, d01 = d01, X = cbind(X1, X2, X3, X4), evalTimes = evalTimes, 
-               cProbEvalTimes =  censoringProb, cProbTimeVar = censoringProb2,
-               breaks = c(0, 75, Inf),
-               init = c(-5, -1, 0, 0),
-               lambda = 0.000)
-
-
-
-
 ## test with PCH data
 X <- mvrnorm(n = cleanN, mu = rep(0, nCov), diag(nCov))
 

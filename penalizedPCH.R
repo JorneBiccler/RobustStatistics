@@ -1,9 +1,14 @@
+## load the necessary packages
 library(RobustAFT)
 
+#########################
+### GENERAL FUNCTIONS ###
+#########################
+
+
 firstIndexIncInterval <- function(evalTimes, breaks){
-  ## function that returns the indices of the breaks vector
-  ## for which the evalTimes value falls between that element
-  ## and the next element of the breaks vector
+  ## function that returns the last index of the breaks vector
+  ## for which the evalTimes value is larger than the corresponding breaks value
   tempMatrix <- matrix(rep(breaks, length(evalTimes)), ncol = length(breaks), byrow = T)
   rowSums(tempMatrix <= evalTimes)
 }
@@ -15,26 +20,28 @@ predictPCH <- function(parameters, breaks, X, evalTimes){
   ##   parameters: a vector containing the intercepts and coefficients,
   ##               the structure should be as follows: first the first intercept
   ##               then the coefficients corresponding to the first interval
+  ##               after which the same is done for the second interval etc.
   ##   breaks: the breakpoints 
   ##   X: covariate matrix
   ##   evalTimes: times for which predictions should be returned
   
-  ## split the parameters into a matrix of coefficients, with columns corresponding
-  ## to coefficients and rows to intervals, and a vector of intercepts
   nCoef <- ncol(X)
   nIntervals <- length(breaks) - 1
+  
+  ## split the parameters into a matrix of coefficients, with columns corresponding
+  ## to coefficients and rows to intervals, and a vector of intercepts
   coef <- matrix(parameters[- seq(from = 1, to = length(parameters), by = nCoef + 1)],
                  ncol = nCoef, byrow = T)
   intercept <- parameters[seq(from = 1, to = length(parameters), by = nCoef + 1)]
   
-  ## case of and exponential model (i.e. breaks = c(0, Inf) or length(breaks) == 2)
+  ## case of an exponential model (i.e. breaks = c(0, Inf) or length(breaks) == 2)
   if(length(breaks) == 2){
     estCumHaz <- do.call(cbind, lapply(1:length(evalTimes),
                                        function(x) (evalTimes[x] - breaks[1]) *
                                          exp(intercept[1] +
                                                as.numeric(X %*% coef[1, ]))))
     
-    ## return the survival estimates
+    ## jump out of the function and return the survival estimates
     predicted <- exp(- estCumHaz)
     return(predicted)
   }
@@ -83,6 +90,7 @@ timeAtRisk <- function(evalTimes, breaks, ncolRep, nrowRep){
   ## the rows correspond with the evalTimes the columns with the intervals
   ## each row is repeated nrowRep times (usually the number of observations)
   ## and each column is repeated ncolRepTimes (usually the number of covariates)
+  
   diffMatrix <- matrix(rep(diff(breaks), length(evalTimes)), byrow = T, nrow = length(evalTimes))
   colIndices <- firstIndexIncInterval(evalTimes, breaks)
   
@@ -102,11 +110,13 @@ extendedY <- function(evalTimes, timeVar){
   ## function that transforms the time variable into 
   ## a new outcome variable with length(evaltimes) * lenght(timeVar) entries
   ## such that the entries are as specified in the least squares equations.
-  rep(timeVar, length(evalTimes)) > rep(evalTimes, each = length(timeVar))
   
+  rep(timeVar, length(evalTimes)) > rep(evalTimes, each = length(timeVar))
 }
 
 paramTransMat <- function(nIntervals, nParameters){
+  ## returns a matrix to go from the differences parameterization to
+  ## the standard parameterization
   matrixOfOnes <- kronecker(matrix(1, ncol = nIntervals, nrow = nIntervals),
                             diag(nParameters))
   matrixOfOnes[upper.tri(matrixOfOnes)] <- 0
@@ -137,6 +147,10 @@ getBrierScore <- function(timeVar, d01, X, cProbEvalTimes, cProbTimeVar, evalTim
 }
 
 getPenalty <- function(param, nParam){
+  ## function that calculates the penalty function
+  ## the parameters should be provided in the differences
+  ## parameterization
+  
   nInterval <- length(param) / nParam
   penalty <- 0
   for(i in 1:nParam){
@@ -171,19 +185,31 @@ proximalStep <- function(curSol, nParam, gradient, stepsize, lambda){
   newSol
 }
 
-brierGradient <- function(IPWWeights, timeAtRiskMat, exY, evalTimes, transformMat, largeX, X, parameters, breaks){
 
+#############################################
+### PCH MODEL WITH A PENALIZED BRIER LOSS ###
+#############################################
+
+
+brierGradient <- function(IPWWeights, timeAtRiskMat, exY, evalTimes, transformMat, 
+                          largeX, X, X2, parameters, breaks){
+  ## returns the gradient of the Brier score
+  
+  ## transform the values to the original parameterizaiton
   oPar <- transformMat %*% parameters
+  ## get the predicted survival at the evaluation times
   predictedSurvival <- as.numeric(predictPCH(oPar, breaks, X, evalTimes))
 
+  ## get the gradient of the original parameterization
   gradient <- NULL
-  X2 <- cbind(1, X)
   for(i in 1:(length(breaks) - 1)){
-    gradient <- c(gradient, t(IPWWeights * (exY - predictedSurvival) * predictedSurvival * timeAtRiskMat[, i] *
-                    as.numeric(exp(X2 %*% oPar[1:(ncol(X2)) + (i - 1) * ncol(X2)]))) %*% largeX)
+  gradient <- c(gradient, t(IPWWeights * (exY - predictedSurvival) * predictedSurvival * timeAtRiskMat[, i] *
+                  as.numeric(exp(X2 %*% oPar[1:(ncol(X2)) + (i - 1) * ncol(X2)]))) %*% largeX)
   }
   
-  t(transformMat) %*% gradient / (length(IPWWeigths))
+  ## transform the gradient to the gradient of the differences parameterization
+  ## and return the vector
+  t(transformMat) %*% gradient / (length(IPWWeights))
 }
 
 penalizedBrier <- function(timeVar, d01, X, evalTimes, 
@@ -195,6 +221,8 @@ penalizedBrier <- function(timeVar, d01, X, evalTimes,
                            bbSteps = T,
                            maxStep = 10^(5),
                            minStep = 10^(-5)){
+  ## Returns the penalized Brier solution.
+  
   # init is the initial solution (in the differences parameterization)
   # perform the first step and set-up some vectors
   oldSol <- init
@@ -209,9 +237,10 @@ penalizedBrier <- function(timeVar, d01, X, evalTimes,
 
   transformMat <- paramTransMat(nIntervals = length(breaks) - 1,
                                 nParameters = ncol(X) + 1)
+  X2 <- cbind(1, X)
   largeX <- X2[rep(1:length(timeVar), length(evalTimes)), ]
   
-  
+  ## get the gradient of the brier score at the initial solution
   gradientOld <- brierGradient(IPWWeights = IPWWeights, 
                                timeAtRiskMat = timeAtRiskMat, 
                                exY = exY, 
@@ -219,18 +248,22 @@ penalizedBrier <- function(timeVar, d01, X, evalTimes,
                                transformMat = transformMat, 
                                largeX = largeX,
                                X = X, 
-                               evalTimes = evalTimes, 
+                               X2 = X2,
                                parameters = oldSol, 
                                breaks =  breaks)
   
+  ## perform a the proximal step
   newSol <- proximalStep(oldSol,
                          ncol(X) + 1,
                          gradientOld,
                          stepSize,
                          lambda)
+  
   gradientCur <- gradientOld
-  i <- 1  
   solDif <- epsilon + 1
+  
+  ## keep performing the proximal gradient steps untill a convergence
+  ## criterion is met
   while((max(abs(gradientCur)) > epsilon) & sum(abs(solDif)) > epsilon){
     #  Barzilai-Borwein steps
     gradientCur <- brierGradient(IPWWeights = IPWWeights, 
@@ -239,8 +272,8 @@ penalizedBrier <- function(timeVar, d01, X, evalTimes,
                                  evalTimes = evalTimes, 
                                  transformMat = transformMat, 
                                  largeX = largeX,
-                                 X = X, 
-                                 evalTimes = evalTimes, 
+                                 X = X,
+                                 X2 = X2, 
                                  parameters = newSol, 
                                  breaks =  breaks)
     
@@ -264,7 +297,6 @@ penalizedBrier <- function(timeVar, d01, X, evalTimes,
                            stepSize,
                            lambda)
     solDif <- newSol - oldSol
-    i <- i + 1
   }
   newSol
 }
@@ -301,22 +333,35 @@ trimmedStarts <- function(timeVar, d01, X, cProbEvalTimes,
 penalizedPathBrier <- function(timeVar, d01, X, evalTimes, 
                                cProbEvalTimes, cProbTimeVar,
                                breaks, lambdaSeq, ...){
+  ## calculate a path of solutions, this helps with convergence issues
+  ## by using warm-starts and a "smart" initial solution
+  ## the result is a matrix in which each row contains esitmated coefficients
+  ## for the corresponding lambda value
+
+  # create a matrix in which the coefficients are saved
   solutions <- matrix(0, nrow = length(lambdaSeq), ncol = (ncol(X) + 1) * (length(breaks) - 1))
 
   # initSol <- trimmedStarts(timeVar = timeVar, d01 = d01, X = X, cProbEvalTimes = cProbEvalTimes,
   #                       cProbTimeVar = cProbTimeVar, evalTimes = evalTimes, ntry = 100)
+  
+  ## use a robust estimate of a weibull model to initialize the path
   TMLObj <- TML.censored(log(timeVar) ~ ., 
                          simData$d01, 
                          data = simData[, !names(simData) %in% "d01"], 
                          errors = "logWeibull")
-  
+  ## transform the robust estimates into the parameterization used in the
+  ## rest of the functions
   initSol <- - TMLObj$th1 / TMLObj$v1
   
+  ## get the first solution using the robust estimates as intial values
   solutions[1, ] <- penalizedBrier(timeVar = timeVar, d01 = d01, X = X, cProbEvalTimes = cProbEvalTimes,
                                    cProbTimeVar = cProbTimeVar, evalTimes = evalTimes, breaks = breaks,
                                    init = c(initSol, rep(0, (ncol(X) + 1)* (length(breaks) - 2))), 
                                    lambda = lambdaSeq[1])
 
+  ## calculate the rest of the path by using warm starts
+  ## i.e. use the solution of hte previous lambda value
+  ## as starting value 
   for(i in 2:length(lambdaSeq)){
     solutions[i, ] <- penalizedBrier(timeVar = timeVar, d01 = d01, X = X, cProbEvalTimes = cProbEvalTimes,
                                      cProbTimeVar = cProbTimeVar, evalTimes = evalTimes, breaks = breaks,
@@ -325,18 +370,17 @@ penalizedPathBrier <- function(timeVar, d01, X, evalTimes,
   solutions
 }
 
+####################################
+### PENALIZED PCH MODEL WITH MLE ###
+####################################
 
-
-mleGradient <- function(O, R, X2, breaks, parameters){
-  nInterval <- length(breaks) - 1 
+mleGradient <- function(O, R, X2, breaks, transformMat, parameters){
+  ## function that calculates the gradient of the log likelihood
   
   ## calculate the parameters in the standard parameterization
-  nIntervals = length(breaks) - 1
-  nParameters <- length(parameters) / nIntervals
-  transformMat <- paramTransMat(nIntervals,
-                                nParameters)
   originalParameters <- transformMat %*% parameters
   
+  # get the gradient by using the original parameterization
   gradient <- NULL
   for(j in 1:(length(breaks) - 1)){
     gradient <- c(gradient,
@@ -344,7 +388,9 @@ mleGradient <- function(O, R, X2, breaks, parameters){
                     t(R[, j]) %*% (as.numeric(exp(X2 %*% originalParameters[1:ncol(X2) + (j - 1) * ncol(X2)])) 
                                    * X2))
   }
-  - 1 * t(transformMat) %*% gradient / (length(timeVar))
+  
+  # transform the gradient into the gradient of the differences parameterization
+  - 1 * t(transformMat) %*% gradient / (nrow(X2))
 }
 
 penalizedMLE <- function(timeVar, d01, X, 
@@ -363,18 +409,28 @@ penalizedMLE <- function(timeVar, d01, X,
   O[cbind(1:length(timeVar), lastIndex)] <- d01
   X2 <- cbind(1, X)
   
-  gradientOld <- mleGradient(O, R, X2, breaks, oldSol)
+  nIntervals <- length(breaks) - 1 
+  nParameters <- length(parameters) / nIntervals
+  transformMat <- paramTransMat(nIntervals,
+                                nParameters)
+  
+  ## get the gradient at the provided intial solution
+  gradientOld <- mleGradient(O, R, X2, breaks, transformMat, oldSol)
+  
+  ## perform the proximal gradient step
   newSol <- proximalStep(oldSol,
                          ncol(X) + 1,
                          gradientOld,
                          stepSize,
                          lambda)
-  i <- 1
   solDif <- epsilon + 1
   gradientCur <- epsilon + 1
+
+  ## perform the proximal gradient steps untill the convergence
+  ## criterion is met
   while((max(gradientCur^2) > epsilon) & sum(solDif^2) > epsilon){
     #  Barzilai-Borwein steps
-    gradientCur <- mleGradient(O, R, X2, breaks, newSol)
+    gradientCur <- mleGradient(O, R, X2, breaks, transformMat, newSol)
     solDif <- newSol - oldSol
     if(bbSteps){
       gradientDif <- gradientCur - gradientOld
@@ -388,20 +444,30 @@ penalizedMLE <- function(timeVar, d01, X,
                            stepSize,
                            lambda)
     solDif <- newSol - oldSol
-    i <- i + 1
   }
   newSol
 }
 
 penalizedPathMLE <- function(timeVar, d01, X, breaks, 
-                             lambdaSeq, ...){
+                             lambdaSeq){
+  ## create a path of penalized MLE's.
+  ## This tends to be more efficient than calculating them one by one
+  ## since warm starts etc. can be used. The result is a matrix with rows
+  ## corresponding to the solutions of different lambda values
+  
+  ## create a matrix in which the path will be saved
   solutions <- matrix(0, nrow = length(lambdaSeq), ncol = (ncol(X) + 1) * (length(breaks) - 1))
+  
+  ## use the standards survreg package to obtain estimates of a constant hazards (exponential) model
+  ## this function is more stable and faster than using the proximal gradient method.
   tempFrame <- data.frame(timeVar, d01, X)
   initSol <- - coef(survreg(Surv(timeVar, d01) ~. , data = tempFrame, dist = "exponential"))
+  
+  ## use the MLE of the expenential model as initial values for the first solution
   solutions[1, ] <- penalizedMLE(timeVar = timeVar, d01 = d01, X = X, breaks = breaks,
                                  init = c(initSol, rep(0, (ncol(X) + 1)* (length(breaks) - 2))), 
                                  lambda = lambdaSeq[1])
-  
+  ## use warm-starts to calculate the solutions for the other lambda values
   for(i in 2:length(lambdaSeq)){
     solutions[i, ] <- penalizedMLE(timeVar = timeVar, d01 = d01, X = X, breaks = breaks,
                                    init = solutions[i - 1, ], lambda = lambdaSeq[i])
@@ -411,6 +477,10 @@ penalizedPathMLE <- function(timeVar, d01, X, breaks,
 
 
 lambdaMaxMLE <- function(timeVar, d01, X, breaks){
+  ## calculate the smalles lambda values for which the model
+  ## has all the differences equal to zero, this is a good
+  ## value from which to start a solution path.
+  
   nParam <- (ncol(X) + 1)
   
   # create some objects needed in the gradient
@@ -420,12 +490,18 @@ lambdaMaxMLE <- function(timeVar, d01, X, breaks){
   O[cbind(1:length(timeVar), lastIndex)] <- d01
   X2 <- cbind(1, X)
   
+  nIntervals <- length(breaks) - 1 
+  nParameters <- length(parameters) / nIntervals
+  transformMat <- paramTransMat(nIntervals,
+                                nParameters)
+  ## fit a standard constant hazards model (exponential distribution).
   tempFrame <- data.frame(timeVar, d01, X)
   initSol <- - coef(survreg(Surv(timeVar, d01) ~. , data = tempFrame, dist = "exponential"))
-  mleGrad <- mleGradient(O, R, X2, breaks = breaks,
-                             parameters = c(initSol, rep(0, (nParam)* (length(breaks) - 2))))
   
-  nIntervals <- length(breaks) - 1
+  ## calculate the gradient of the MLE
+  mleGrad <- mleGradient(O, R, X2, breaks, transformMat,
+                             c(initSol, rep(0, (nParam)* (length(breaks) - 2))))
+  ## get the lambda value
   lambdaMax <- 0
   for(i in 1:nParam){
     paramIndices <- i + (1:(nIntervals - 1)) * nParam
@@ -439,13 +515,20 @@ lambdaMaxMLE <- function(timeVar, d01, X, breaks){
 
 cvMLE <- function(timeVar, d01, X, breaks, 
                   nLambda = 20, logLamdaRatio = 5, nFolds = 10, ...){
+  ## funtion that selects the best lambda value by using a cross validated
+  ## Brier score as evaluation criterion.
+  
+  ## getthe maximum lambda value of interest and create a sequence of lambda values
   logMaxLambda <- - log(lambdaMaxMLE(timeVar = timeVar, d01 = d01, breaks = breaks, X = X))
   lambdaSeq <- exp(- seq(logMaxLambda * (1 - logMaxLambda/nLambda) , logMaxLambda*logLamdaRatio, length.out = nLambda))
   
   # sample CV indices
   randSample <- sample(nrow(X))
-  CVIndicesList <- split(randSample, ceiling(seq_along(randSample)/(length(randSample)/nFolds)))  
+  CVIndicesList <- split(randSample, ceiling(seq_along(randSample)/(length(randSample)/nFolds))) 
+  
+  # create a vector in which to save the brier scores
   brierScores <- rep(0, nLambda)
+  # perform the CV steps
   for(i in 1:nFolds){
     trTimeVar <- timeVar[- CVIndicesList[[i]]]
     testTimeVar <- timeVar[CVIndicesList[[i]]]
@@ -471,8 +554,13 @@ cvMLE <- function(timeVar, d01, X, breaks,
                                                        difParam = T)
     }
   }
-  solutionPath <- penalizedPathMLE(timeVar = timeVar, d01 = d01, 
-                                   X = X, breaks = breaks,
-                                   lambdaSeq = lambdaSeq)
-  solutionPath[which.min(brierScores), ]
+  ## calculate the solution of the best lambda value
+  ## the intial parameter values are the ones obtained in the
+  ## last CV step and for the corresponding lambda value
+  penalizedMLE(timeVar = timeVar, 
+               d01 = d01, 
+               X = X, 
+               breaks = breaks,
+               init = foldPath[which.min(brierScores), ], 
+               lambda = lambdaSeq[which.min(brierScores)])
 }
